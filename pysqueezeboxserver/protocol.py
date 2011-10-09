@@ -1,8 +1,11 @@
+import re
 import sys
+from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
+from twisted.python import log
 
 
-class SqueezeboxServer(LineReceiver):
+class SqueezeboxServerProtocol(LineReceiver):
 
 
     """ Squeezebox Server Twisted Protocol """
@@ -17,7 +20,6 @@ class SqueezeboxServer(LineReceiver):
         pass
         self.state = dict()
         self.players = dict()
-        #self.setLineMode()
 
 
     # General callback methods
@@ -26,39 +28,37 @@ class SqueezeboxServer(LineReceiver):
 
         """ On connection callback """
 
-        print "Connected"
-        self.on_init()
-
-
-    def on_init(self):
-
-        """ On initialisation callback """
-
-        self.send("login")
-        self.send("player count ?")
+        log.msg("Connected")
 
 
     def on_data(self, data):
 
         """ On data received callback """
 
-        print "Data: [%s]" % (data)
-        print data[-1] == "\n"
+        log.msg("Data: [%s]" % (data))
 
 
     def on_line(self, line):
 
         """ On line received callback """
 
-        print "Line: [%s]" % (line)
+        line = self._unquote(line).strip()
+
+        is_event = re.compile("([a-fA-F0-9]{2}[:|\-]?){6}").match(line)
+        line_type = "Event" if is_event else "Response"
+
+        log.msg("%s: [%s]" % (line_type, line))
 
         parts = line.split()
         params = list()
 
+        if is_event:
+            self.on_event(parts[0], parts[1:])
+            return
+
         while parts:
             method_name = "_".join(parts)
             try:
-                print "Looking for method 'on_%s'" % (method_name)
                 method = getattr(self, "on_%s" % (method_name))
                 method(*params[::-1])
                 break
@@ -70,6 +70,22 @@ class SqueezeboxServer(LineReceiver):
 
 
 
+    def init(self,
+             username=None,
+             password=None):
+
+        """ Initialisation helper method """
+
+        self.send("login")
+        self.send("listen 1")
+        self.send("player count ?")
+
+
+    def on_event(self, player, args):
+
+        """ On event helper method """
+
+        log.msg("Event for player '%s': %s" % (player, args))
 
 
     def update_players(self, count):
@@ -80,8 +96,22 @@ class SqueezeboxServer(LineReceiver):
             self.send("player id %i ?" % (i))
 
 
-
     # Squeezebox Server data callback helpers
+
+
+    def on_login(self, *args):
+
+        """ Helper for 'login' """
+
+        self.state["logged_in"] = (args[0] == "******")
+
+
+    def on_listen(self, *args):
+
+        """ Helper for 'listen' """
+
+        print args
+
 
     def on_player_count(self, *args):
 
@@ -99,7 +129,7 @@ class SqueezeboxServer(LineReceiver):
         player = int(args[0])
         addr = self._unquote(args[1])
         
-        print "Player #%i: %s" % (player, addr)
+        log.msg("Player #%i: %s" % (player, addr))
 
 
 
@@ -127,7 +157,6 @@ class SqueezeboxServer(LineReceiver):
 
         """ Twisted data received callback """
 
-        print "Data Received"
         self.on_data(data)
 
 
@@ -135,7 +164,6 @@ class SqueezeboxServer(LineReceiver):
 
         """ Twisted line received callback """
 
-        print "Line Received"
         self.on_line(line)
 
 
@@ -164,3 +192,44 @@ class SqueezeboxServer(LineReceiver):
         except ImportError:
             import urllib
             return urllib.unquote(text)
+
+
+
+class SqueezeboxServerFactory(ClientFactory):
+
+
+    """ Squeezebox Server Twisted Client Factory """
+
+
+    protocol = SqueezeboxServerProtocol
+
+
+    def clientConnectionFailed(self, connector, reason):
+        
+        reactor.stop()
+
+
+    def clientConnectionLost(self, connector, reason):
+
+        reactor.stop()
+
+
+    def startFactory(self):
+
+        self.message_queue = []
+        self.client_instance = None
+
+
+    def clientReady(self, instance):
+        
+        self.client_instance = instance
+        for msg in self.message_queue:
+            self.sendMessage(msg)
+
+
+    def sendMessage(self, msg):
+
+        if self.client_instance is not None:
+            self.client_instance.send_line(msg)
+        else:
+            self.message_queue.append(msg)
